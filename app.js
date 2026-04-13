@@ -1,7 +1,7 @@
 import { Markup } from "telegraf";
 import { bot } from "./bot.js"
 import { User } from "./models/user.model.js"
-import { checkSubscription } from "./functions.js"
+import { checkSubscription, sendSoftwareInfo } from "./functions.js"
 import "dotenv/config"
 
 const channelId = process.env.CHANNELID
@@ -9,7 +9,7 @@ const channelId = process.env.CHANNELID
 import "./admin.js"
 
 // START
-async function startFunc(ctx) {
+async function startFunc(ctx, text2) {
     const { id: telegram_id, username, first_name, last_name } = ctx.from;
     const full_name = [first_name, last_name].filter(Boolean).join(' ');
 
@@ -21,7 +21,11 @@ async function startFunc(ctx) {
     if (created) {
         text = `<b>Xush kelibsiz! ✨\n\n<a href="tg://user?id=${telegram_id}">${first_name}</a>, Pastdan kerakli bo'limni tanlang 😊</b>`
     } else {
-        text = `<b>🏠 Bosh menyu</b>`
+        if (text2) {
+            text = text2
+        } else {
+            text = `<b>Qayta ko'rishganimdan hursandman 😊</b>`
+        }
     }
     await ctx.replyWithHTML(text, Markup.keyboard
         (
@@ -81,30 +85,24 @@ async function onMessageFunc(ctx) {
     }
 
     else if (text === "🔙 Orqaga qaytish") {
-        await startFunc(ctx)
+        await startFunc(ctx, "🏠 Bosh menyu")
     }
 
     else if (text === "🐧 Ubuntu") {
-        await ctx.replyWithHTML(
-            "<b>🐧 Ubuntu operatsion tizimi</b>\n\n" +
+        await sendSoftwareInfo(
+            ctx,
+            "🐧 Ubuntu operatsion tizimi",
             "Quyidagi tugmani bosish orqali ISO faylni yuklab olishingiz mumkin:",
-            Markup.inlineKeyboard([
-                [
-                    Markup.button.url("📥 Yuklab olish", "https://drive.google.com/file/d/15JR_1Xuzhlq8vkdyExREI3EJClPGQbzj/view?usp=sharing")
-                ]
-            ])
-        )
+            "https://drive.google.com/file/d/15JR_1Xuzhlq8vkdyExREI3EJClPGQbzj/view?usp=sharing"
+        );
     }
 
     else if (text === "💾 Rufus") {
-        await ctx.replyWithHTML(
-            "<b>💾 Rufus Dasturi</b>\n\n" +
-            "Ushbu dastur yordamida yuklanuvchi (bootable) USB fleshkalar yaratishingiz mumkin.\n\n",
-            Markup.inlineKeyboard([
-                [
-                    Markup.button.url("📥 Yuklab olish", "https://drive.google.com/file/d/1y7uHKUUUJ4ZJeGwPLYLU_P0d9klhdY03/view?usp=sharing")
-                ]
-            ])
+        await sendSoftwareInfo(
+            ctx,
+            "💾 Rufus Dasturi",
+            "Ushbu dastur yordamida yuklanuvchi (bootable) USB fleshkalar yaratishingiz mumkin.",
+            "https://drive.google.com/file/d/1y7uHKUUUJ4ZJeGwPLYLU_P0d9klhdY03/view?usp=sharing"
         );
     }
 }
