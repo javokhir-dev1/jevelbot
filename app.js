@@ -1,9 +1,14 @@
 import { Markup } from "telegraf";
 import { bot } from "./bot.js"
 import { User } from "./models/user.model.js"
+import { checkSubscription } from "./functions.js"
+import "dotenv/config"
+
+const channelId = process.env.CHANNELID
+
+import "./admin.js"
 
 // START
-
 async function startFunc(ctx) {
     const { id: telegram_id, username, first_name, last_name } = ctx.from;
     const full_name = [first_name, last_name].filter(Boolean).join(' ');
@@ -14,14 +19,15 @@ async function startFunc(ctx) {
     });
     let text = ""
     if (created) {
-        text = `<b>Xush kelibsiz! ✨\n\nMen **Jevel bot**man. Sizga xizmat ko'rsatishdan mamnunman, ${first_name}!</b>`
+        text = `<b>Xush kelibsiz! ✨\n\n<a href="tg://user?id=${telegram_id}">${first_name}</a>, Pastdan kerakli bo'limni tanlang 😊</b>`
     } else {
-        text = `<b>Qayta ko'rishganimizdan xursandman! 😊</b>`
+        text = `<b>🏠 Bosh menyu</b>`
     }
     await ctx.replyWithHTML(text, Markup.keyboard
         (
             [
-                ["💾 Rufus", "🐧 Ubuntu"],
+                ["➕ Loyiha qo'shish"],
+                ["👨‍💻 Admin bilan aloqa", "📚 Kerakli resurslar"]
             ]
         ).resize()
     )
@@ -32,23 +38,53 @@ bot.start(async (ctx) => {
         .catch((err) => console.log(err))
 })
 
-// ADMIN
-
-async function adminFunc(ctx) {
-    const users_count = await User.count()
-    await ctx.reply(`Jami userlar: ${users_count}`)
-}
-
-bot.command("admin", async (ctx) => {
-    adminFunc(ctx)
-        .catch((err) => console.log(err))
-})
-
 // ON MESSAGE
+
+async function callToSubscription(ctx) {
+    await ctx.reply(
+        "🌟 **Loyiha rivojiga hissa qo'shing!**\n\nDavom etish uchun Javohirning rasmiy sahifasiga obuna bo'lishingizni so'raymiz.",
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                [Markup.button.url("📢 Obuna bo'lish", "https://t.me/javokhxirr")],
+                [Markup.button.callback("✅ Tekshirish", "check_sub")]
+            ])
+        }
+    );
+}
 
 async function onMessageFunc(ctx) {
     const text = ctx.message.text
-    if (text === "🐧 Ubuntu") {
+    const isSubscribed = await checkSubscription(ctx, channelId)
+    if (!isSubscribed) {
+        return callToSubscription(ctx)
+            .catch((err) => console.log(err))
+    }
+
+    if (text === "➕ Loyiha qo'shish") {
+        ctx.reply("loyiha qo'shish")
+    }
+
+    else if (text === "📚 Kerakli resurslar") {
+        await ctx.replyWithHTML("<b>Kerakli resursni pastdan tanlang 👇</b>",
+            Markup.keyboard(
+                [
+                    ["🐧 Ubuntu", "💾 Rufus"],
+                    ["🔙 Orqaga qaytish"]
+                ]
+            ).resize()
+        )
+    }
+
+    else if (text === "👨‍💻 Admin bilan aloqa") {
+        ctx.reply("admin bilan aloqa")
+    }
+
+    else if (text === "🔙 Orqaga qaytish") {
+        await startFunc(ctx)
+    }
+
+    else if (text === "🐧 Ubuntu") {
         await ctx.replyWithHTML(
             "<b>🐧 Ubuntu operatsion tizimi</b>\n\n" +
             "Quyidagi tugmani bosish orqali ISO faylni yuklab olishingiz mumkin:",
@@ -58,7 +94,9 @@ async function onMessageFunc(ctx) {
                 ]
             ])
         )
-    } else if (text === "💾 Rufus") {
+    }
+
+    else if (text === "💾 Rufus") {
         await ctx.replyWithHTML(
             "<b>💾 Rufus Dasturi</b>\n\n" +
             "Ushbu dastur yordamida yuklanuvchi (bootable) USB fleshkalar yaratishingiz mumkin.\n\n",
@@ -70,6 +108,21 @@ async function onMessageFunc(ctx) {
         );
     }
 }
+
+bot.action("check_sub", async (ctx) => {
+    try {
+        const isSubscribed = await checkSubscription(ctx, channelId);
+
+        if (isSubscribed) {
+            await ctx.answerCbQuery("Rahmat! Obuna tasdiqlandi.");
+            await ctx.editMessageText("Tabriklaymiz, endi botdan foydalanishingiz mumkin! 🎉");
+        } else {
+            await ctx.answerCbQuery("Siz hali a'zo bo'lmagansiz! ❌", { show_alert: true });
+        }
+    } catch (err) {
+        console.log(err)
+    }
+})
 
 bot.on("message", async (ctx) => {
     onMessageFunc(ctx)
