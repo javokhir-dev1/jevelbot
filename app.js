@@ -70,16 +70,21 @@ async function callToSubscription(ctx) {
 async function onMessageFunc(ctx) {
     if (!session[ctx.from.id]) session[ctx.from.id] = {}
     const text = ctx.message.text
-    const isSubscribed = await checkSubscription(ctx, channelId)
+    const userSession = session[ctx.from.id]
 
+    // Obunani tekshirish
+    const isSubscribed = await checkSubscription(ctx, channelId)
     if (!isSubscribed) {
         return callToSubscription(ctx)
             .catch((err) => console.log(err))
     }
-    if (session[ctx.from.id]["state"] === "waiting_document") {
+
+    // --- BOSQICHMA-BOSQICH MULOQOT (STEP-BY-STEP DIALOG) ---
+
+    // 1-QADAM: Arxivni qabul qilish
+    if (userSession["state"] === "waiting_document") {
         const file = ctx.message.document;
         const allowedExtensions = ['zip', 'rar'];
-
         const fileExtension = file?.file_name?.split('.').pop().toLowerCase();
 
         if (!file || !allowedExtensions.includes(fileExtension)) {
@@ -92,52 +97,98 @@ async function onMessageFunc(ctx) {
                 ])
             );
         }
-        const fileId = file.file_id;
-        const link = await ctx.telegram.getFileLink(fileId);
 
-        const uniqueId = uuid();
-        const downloadDir = path.join(__dirname, "downloads", uniqueId);
-        await fs.ensureDir(downloadDir);
+        userSession.tempFileId = file.file_id; // Faylni vaqtincha saqlash
+        userSession.state = "waiting_project_name"; // Holatni o'zgartirish
 
-        const extension = path.extname(link.pathname);
-        const filePath = path.join(downloadDir, `file${extension}`);
-
-        const response = await axios({
-            url: link.href,
-            method: "GET",
-            responseType: "stream",
-        });
-
-        const writer = fs.createWriteStream(filePath);
-        response.data.pipe(writer);
-
-        await new Promise((resolve, reject) => {
-            writer.on("finish", resolve);
-            writer.on("error", reject);
-        });
-
-        console.log("Fayl yuklandi:", filePath);
-
-        if (filePath.endsWith(".zip")) {
-            await extractZip(filePath, downloadDir);
-        } else if (filePath.endsWith(".rar")) {
-            await extractRar(filePath, downloadDir);
-        }
-        await fs.remove(filePath);
-
-        await flattenDirectory(downloadDir);
-
-        runPythonInDocker(downloadDir, "main.py", uniqueId, ctx.from.id, "loyiha nomi");
+        return await ctx.replyWithHTML("<b>✅ Arxiv qabul qilindi.</b>\n\nEndi, loyihangizga nom bering:");
     }
 
+    // 2-QADAM: Loyiha nomini qabul qilish
+    else if (userSession["state"] === "waiting_project_name") {
+        if (!text) {
+            return await ctx.reply("Iltimos, loyiha nomini matn ko'rinishida yozing:");
+        }
+
+        userSession.projectName = text; // Nomni saqlash
+        userSession.state = "waiting_main_file"; // Holatni o'zgartirish
+
+        return await ctx.replyWithHTML(
+            "<b>🚀 Asosiy faylni ko'rsating</b>\n\n" +
+            "Ishga tushishi kerak bo'lgan fayl nomini yozing (masalan: <code>main.py</code> yoki <code>app.js</code>):"
+        );
+    }
+
+    // 3-QADAM: Asosiy faylni qabul qilish va Dockerga yuborish
+    else if (userSession["state"] === "waiting_main_file") {
+        if (!text) {
+            return await ctx.reply("Fayl nomini matn ko'rinishida yozing (masalan: main.py):");
+        }
+
+        const mainFile = text;
+        const projectName = userSession.projectName;
+        const fileId = userSession.tempFileId;
+
+        const statusMsg = await ctx.reply("⏳ Loyiha ishga tushirilmoqda...");
+
+        try {
+            const link = await ctx.telegram.getFileLink(fileId);
+            const uniqueId = uuid();
+            const downloadDir = path.join(__dirname, "downloads", uniqueId);
+            await fs.ensureDir(downloadDir);
+
+            const extension = path.extname(link.pathname);
+            const filePath = path.join(downloadDir, `file${extension}`);
+
+            const response = await axios({
+                url: link.href,
+                method: "GET",
+                responseType: "stream",
+            });
+
+            const writer = fs.createWriteStream(filePath);
+            response.data.pipe(writer);
+
+            await new Promise((resolve, reject) => {
+                writer.on("finish", resolve);
+                writer.on("error", reject);
+            });
+
+            console.log("Fayl yuklandi:", filePath);
+
+            if (filePath.endsWith(".zip")) {
+                await extractZip(filePath, downloadDir);
+            } else if (filePath.endsWith(".rar")) {
+                await extractRar(filePath, downloadDir);
+            }
+            await fs.remove(filePath);
+
+            await flattenDirectory(downloadDir);
+
+            // Docker funksiyasini chaqirish (statusMsg bilan birga)
+            await runPythonInDocker(downloadDir, mainFile, uniqueId, ctx, projectName, statusMsg);
+
+        } catch (error) {
+            console.error("Xatolik:", error);
+            await ctx.reply("❌ Loyihani ishga tushirishda xatolik yuz berdi.");
+        }
+
+        // Sessiyani tozalash
+        delete userSession.state;
+        delete userSession.tempFileId;
+        delete userSession.projectName;
+        return;
+    }
+
+    // --- ASOSIY BUYRUQLAR ---
     if (text === "➕ Loyiha qo'shish") {
-        session[ctx.from.id]["state"] = "waiting_document"
+        userSession["state"] = "waiting_document"
         await ctx.replyWithHTML(
             "<b>📦 Loyihani yuklash</b>\n\n" +
             "Iltimos, loyihangiz papkasini <b>.zip</b> yoki <b>.rar</b> formatida yuboring.\n\n" +
             "<b>⚠️ Muhim shartlar:</b>\n" +
             "• <code>requirements.txt</code> fayli mavjud bo'lishi shart.\n" +
-            "• Asosiy ishga tushuvchi fayl (main) loyihaning <b>ildiz (root)</b> qismida joylashishi kerak."
+            "• Asosiy ishga tushuvchi fayl loyihaning <b>ildiz (root)</b> qismida joylashishi kerak."
         );
     }
 
@@ -151,7 +202,7 @@ async function onMessageFunc(ctx) {
         }
 
         const projectList = projects.map((p, index) =>
-            `${index + 1}. <b>ID:</b> <code>${p.project_id}</code> | <b>Holati:</b> ${p.status}`
+            `${index + 1}. <b>ID:</b> <code>${p.project_name}</code> | <b>Holati:</b> ${p.status}`
         ).join('\n');
 
         const buttons = projects.map(p => [

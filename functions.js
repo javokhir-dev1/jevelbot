@@ -12,7 +12,7 @@ import { UserProject } from "./models/userproject.model.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export const runPythonInDocker = (projectPath, pythonFile, projectname, telegram_id) => {
+export const runPythonInDocker = (projectPath, pythonFile, projectid, ctx, projectname, statusMsg) => {
     try {
         const absolutePath = path.resolve(projectPath);
         const dockerfilePath = path.join(absolutePath, 'Dockerfile');
@@ -26,55 +26,46 @@ RUN useradd -m appuser
 COPY . .
 USER appuser
 CMD ["python", "${pythonFile}"]
-        `.trim()
+        `.trim();
 
         fs2.writeFileSync(dockerfilePath, dockerfileContent);
-        console.log("✅ Dockerfile yaratildi");
 
-        console.log("🚀 BUILD (background)...");
-        const build = spawn("docker", ["build", "-t", projectname, absolutePath]);
-
-        build.stdout.on("data", (data) => {
-            console.log("BUILD:", data.toString());
-        });
-
-        build.stderr.on("data", (data) => {
-            console.error("BUILD ERROR:", data.toString());
-        });
+        const build = spawn("docker", ["build", "-t", projectid, absolutePath]);
 
         build.on("close", (code) => {
-            console.log("BUILD tugadi:", code);
-
             if (code === 0) {
-                console.log("📦 RUN (background)...");
-
-                const run = spawn("docker", ["run", "-d", projectname]);
+                const run = spawn("docker", ["run", "-d", projectid]);
                 let containerId = "";
 
                 run.stdout.on("data", (data) => {
                     containerId += data.toString();
                 });
 
-                run.stderr.on("data", (data) => {
-                    console.error("PYTHON ERROR:", data.toString());
-                });
-
                 run.on("close", async (code) => {
                     containerId = containerId.trim();
+                    
                     await UserProject.create({
-                        telegram_id: telegram_id,
-                        project_id: projectname,
+                        telegram_id: String(ctx.from.id),
+                        project_id: projectid,
+                        project_name: projectname, // Modelga qarab to'g'rilang
                         container_id: containerId || "nomalum",
                         status: "active"
-                    })
-                    console.log("📦 Container ID:", containerId);
-                    console.log("Container tugadi:", code);
+                    }).catch((err) => console.log("DB Error:", err));
+
+                    await ctx.telegram.editMessageText(
+                        ctx.chat.id, 
+                        statusMsg.message_id, 
+                        null, 
+                        "✅ Loyiha muvaffaqiyatli ishga tushdi!"
+                    ).catch((err) => console.log("Edit Error:", err));
                 });
+            } else {
+                ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, "❌ Build xatosi!");
             }
         });
 
     } catch (error) {
-        console.error("❌ Xatolik:", error);
+        ctx.reply(`Xatolik: ${error.message}`);
     }
 };
 
