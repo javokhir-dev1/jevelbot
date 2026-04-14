@@ -1,6 +1,8 @@
 import { Telegraf } from "telegraf";
 import { sequelize } from "./config/db.js"
 
+export const session = {}
+
 import dotenv from "dotenv"
 dotenv.config()
 

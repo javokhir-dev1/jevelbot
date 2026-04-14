@@ -1,5 +1,5 @@
 import { Markup } from "telegraf"
-import { bot } from "./bot.js"
+import { bot, session } from "./bot.js"
 import { User } from "./models/user.model.js"
 import { checkSubscription, extractRar, extractZip, sendSoftwareInfo, flattenDirectory, runPythonInDocker } from "./functions.js"
 import { fileURLToPath } from "url"
@@ -10,6 +10,7 @@ import { v4 as uuid } from "uuid"
 
 import "dotenv/config"
 import "./admin.js"
+import { UserProject } from "./models/userproject.model.js"
 
 const channelId = process.env.CHANNELID
 
@@ -39,6 +40,7 @@ async function startFunc(ctx, text2) {
         (
             [
                 ["➕ Loyiha qo'shish"],
+                ["🚀 Loyihalarim"],
                 ["👨‍💻 Admin bilan aloqa", "📚 Kerakli resurslar"]
             ]
         ).resize()
@@ -66,16 +68,30 @@ async function callToSubscription(ctx) {
 }
 
 async function onMessageFunc(ctx) {
+    if (!session[ctx.from.id]) session[ctx.from.id] = {}
     const text = ctx.message.text
-    const file = ctx.message.document
     const isSubscribed = await checkSubscription(ctx, channelId)
 
     if (!isSubscribed) {
         return callToSubscription(ctx)
             .catch((err) => console.log(err))
     }
+    if (session[ctx.from.id]["state"] === "waiting_document") {
+        const file = ctx.message.document;
+        const allowedExtensions = ['zip', 'rar'];
 
-    if (file) {
+        const fileExtension = file?.file_name?.split('.').pop().toLowerCase();
+
+        if (!file || !allowedExtensions.includes(fileExtension)) {
+            return await ctx.replyWithHTML(
+                "<b>⚠️ Xatolik: Noto'g'ri format!</b>\n\n" +
+                "Iltimos, loyihangizni faqat <b>arxiv (.zip yoki .rar)</b> ko'rinishida yuboring.\n" +
+                "Oddiy fayllar yoki boshqa formatlar qabul qilinmaydi.",
+                Markup.inlineKeyboard([
+                    [Markup.button.callback("❌ Bekor qilish", "cancel_process")]
+                ])
+            );
+        }
         const fileId = file.file_id;
         const link = await ctx.telegram.getFileLink(fileId);
 
@@ -111,12 +127,41 @@ async function onMessageFunc(ctx) {
 
         await flattenDirectory(downloadDir);
 
-        // Docker yoki keyingi jarayonni boshlash
-        runPythonInDocker(downloadDir, "main.py");
+        runPythonInDocker(downloadDir, "main.py", uniqueId, ctx.from.id, "loyiha nomi");
     }
 
     if (text === "➕ Loyiha qo'shish") {
-        ctx.reply("loyiha qo'shish")
+        session[ctx.from.id]["state"] = "waiting_document"
+        await ctx.replyWithHTML(
+            "<b>📦 Loyihani yuklash</b>\n\n" +
+            "Iltimos, loyihangiz papkasini <b>.zip</b> yoki <b>.rar</b> formatida yuboring.\n\n" +
+            "<b>⚠️ Muhim shartlar:</b>\n" +
+            "• <code>requirements.txt</code> fayli mavjud bo'lishi shart.\n" +
+            "• Asosiy ishga tushuvchi fayl (main) loyihaning <b>ildiz (root)</b> qismida joylashishi kerak."
+        );
+    }
+
+    else if (text === "🚀 Loyihalarim") {
+        const projects = await UserProject.findAll({
+            where: { telegram_id: String(ctx.from.id) }
+        });
+
+        if (projects.length === 0) {
+            return await ctx.reply("Sizda hali loyihalar mavjud emas. 📂");
+        }
+
+        const projectList = projects.map((p, index) =>
+            `${index + 1}. <b>ID:</b> <code>${p.project_id}</code> | <b>Holati:</b> ${p.status}`
+        ).join('\n');
+
+        const buttons = projects.map(p => [
+            Markup.button.callback(`❌ O'chirish: ${p.project_id}`, `delete_project_${p.id}`)
+        ]);
+
+        await ctx.replyWithHTML(
+            `<b>Sizning loyihalaringiz:</b>\n\n${projectList}`,
+            Markup.inlineKeyboard(buttons)
+        );
     }
 
     else if (text === "📚 Kerakli resurslar") {
@@ -156,6 +201,16 @@ async function onMessageFunc(ctx) {
         )
     }
 }
+
+bot.action("cancel_process", async (ctx) => {
+    try {
+        if (!session[ctx.from.id]) session[ctx.from.id] = {}
+        session[ctx.from.id]["state"] = ""
+        await ctx.editMessageText("<b>✅ Bekor qilindi</b>", { parse_mode: "HTML" })
+    } catch (err) {
+        console.log(err)
+    }
+})
 
 bot.action("check_sub", async (ctx) => {
     try {
