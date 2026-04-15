@@ -8,9 +8,24 @@ import { fileURLToPath } from 'url';
 import { createExtractorFromData } from 'node-unrar-js';
 import { spawn } from "child_process";
 import { UserProject } from "./models/userproject.model.js";
+import os from "os";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+
+export function logSystemUsage() {
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
+
+    const cpuLoad = os.loadavg()[0]; // 1 min load
+
+    console.log("🖥 SYSTEM STATS:");
+    console.log(`RAM: ${(usedMem / 1024 / 1024).toFixed(0)} MB used / ${(totalMem / 1024 / 1024).toFixed(0)} MB total`);
+    console.log(`FREE RAM: ${(freeMem / 1024 / 1024).toFixed(0)} MB`);
+    console.log(`CPU LOAD (1m): ${cpuLoad}`);
+}
 
 export const renderProjectsMessage = async (ctx) => {
     const projects = await UserProject.findAll({
@@ -92,232 +107,206 @@ export const runPythonInDocker = async (
     projectname,
     statusMsg
 ) => {
-    try {
-        const absolutePath = path.resolve(projectPath);
-        const dockerfilePath = path.join(absolutePath, "Dockerfile");
+    const absolutePath = path.resolve(projectPath);
+    const dockerfilePath = path.join(absolutePath, "Dockerfile");
 
-        let errorSent = false;
-        let hasError = false;
-        let containerId = "";
+    let containerId = "";
+    let errorSent = false;
+    let hasError = false;
+    let errorBuffer = "";
 
-        const removeContainer = (id) => {
-            if (!id) return;
-            spawn("docker", ["rm", "-f", id]);
-        };
-
-        const sendErrorToTelegram = async (errorLog) => {
-            if (errorSent) return;
-            errorSent = true;
-            hasError = true;
-
-            const safeLog = errorLog
-                .replace(/&/g, "&amp;")
-                .replace(/</g, "&lt;")
-                .replace(/>/g, "&gt;")
-                .slice(0, 3000);
-
-            const message =
-                `❌ <b>[${projectname}] xatolik:</b>\n\n` +
-                `<pre><code>${safeLog}</code></pre>\n\n` +
-                `⚠️ <b>Kodingizda xatolik aniqlandi.</b>\n` +
-                `Uni to‘g‘irlab qayta urinib ko‘ring.`;
-
-            // yangi message (user albatta ko‘radi)
-            await ctx.reply(message, { parse_mode: "HTML" })
-                .catch(() => { });
-
-            // eski statusni ham update qilamiz
+    const updateStatus = async (text) => {
+        try {
             await ctx.telegram.editMessageText(
                 ctx.chat.id,
                 statusMsg.message_id,
                 null,
-                "❌ Loyiha xatolik bilan to‘xtadi!"
-            ).catch(() => { });
+                text
+            );
+        } catch (_) { }
+    };
 
-            // container o‘chirish
-            removeContainer(containerId);
+    const sendError = async (log, stage = "UNKNOWN") => {
+        if (errorSent) return;
+        errorSent = true;
+        hasError = true;
 
-            // DB update
-            await UserProject.update(
-                { status: "crashed" },
-                { where: { project_id: projectid } }
-            ).catch(() => { });
-        };
+        const safeLog = log
+            .toString()
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .slice(0, 3500);
 
-        // 🧹 eski containerni o‘chirish
+        await ctx.reply(
+            `❌ <b>[${projectname}] xatolik (${stage})</b>\n\n` +
+            `<pre>${safeLog}</pre>\n\n` +
+            `⚠️ <b>Loyiha xatolik sabab to‘xtadi.</b>\n` +
+            `🔁 <b>Xatolarni tuzatib qayta urinib ko‘ring.</b>`,
+            { parse_mode: "HTML" }
+        ).catch(() => { });
+
+        await updateStatus("❌ Loyiha xatolik bilan to‘xtadi!");
+
+        if (containerId) {
+            spawn("docker", ["rm", "-f", containerId]);
+        }
+
+        await UserProject.destroy({
+            where: { project_id: projectid }
+        }).catch(() => { });
+    };
+
+    const exec = (cmd, args) =>
+        new Promise((resolve) => {
+            const p = spawn(cmd, args);
+            let out = "";
+            let err = "";
+
+            p.stdout?.on("data", d => out += d.toString());
+            p.stderr?.on("data", d => err += d.toString());
+
+            p.on("close", code => resolve({ code, out, err }));
+        });
+
+    try {
+        await updateStatus("📦 Loyihani tayyorlash...");
+
+        // 🧹 eski container
         spawn("docker", ["rm", "-f", `${projectid}_container`]);
 
-        // 1. Dockerfile
+        // 🐳 Dockerfile
+        await updateStatus("📝 Muhit sozlanmoqda...");
+
         const dockerfileContent = `
 FROM python:3.10-slim
 WORKDIR /app
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-RUN useradd -m appuser
+
+RUN pip install --no-cache-dir -r requirements.txt || (echo "PIP ERROR" && exit 1)
+
 COPY . .
+
+RUN useradd -m appuser
 USER appuser
+
 ENV PYTHONUNBUFFERED=1
+
 CMD ["python", "-u", "${pythonFile}"]
 `.trim();
 
         fs2.writeFileSync(dockerfilePath, dockerfileContent);
 
-        // 2. BUILD
+
         const build = spawn("docker", ["build", "-t", projectid, absolutePath]);
 
         let buildError = "";
 
-        build.stderr.on("data", (d) => {
-            buildError += d.toString();
+        build.stderr.on("data", d => buildError += d.toString());
+
+        const buildCode = await new Promise(resolve =>
+            build.on("close", resolve)
+        );
+
+        if (buildCode !== 0) {
+            await sendError(buildError, "BUILD");
+            return;
+        }
+
+        // 🚀 RUN
+        await updateStatus("🚀 Muhit ishga tushirilmoqda...");
+
+        const run = await exec("docker", [
+            "run",
+            "-d",
+            "--cpus=0.1",
+            "--memory=256m",
+            "--memory-swap=256m",
+            "--pids-limit=50",
+            "--name",
+            `${projectid}_container`,
+            projectid
+        ]);
+
+        if (run.code !== 0) {
+            await sendError(run.err, "RUN");
+            return;
+        }
+
+        containerId = run.out.trim();
+
+        await updateStatus("🟡 Muhit ishga tushdi, tekshirilmoqda...");
+
+        await UserProject.create({
+            telegram_id: String(ctx.from.id),
+            project_id: projectid,
+            project_name: projectname,
+            container_id: containerId,
+            status: "starting"
+        }).catch(() => { });
+
+        // 📜 LOG STREAM
+        const logs = spawn("docker", ["logs", "-f", containerId]);
+
+        const isError = (text) =>
+            /traceback|error|exception|failed/i.test(text);
+
+        logs.stdout.on("data", async (d) => {
+            const log = d.toString();
+            errorBuffer += log;
+
+            if (!hasError && isError(errorBuffer)) {
+                await sendError(errorBuffer, "RUNTIME");
+            }
         });
 
-        build.on("close", async (code) => {
-            if (code !== 0) {
-                return ctx.telegram.editMessageText(
-                    ctx.chat.id,
-                    statusMsg.message_id,
-                    null,
-                    `❌ Build xato:\n${buildError.slice(0, 1000)}`
-                );
+        logs.stderr.on("data", async (d) => {
+            const log = d.toString();
+            errorBuffer += log;
+
+            if (!hasError && isError(errorBuffer)) {
+                await sendError(errorBuffer, "RUNTIME");
             }
+        });
 
-            // 3. RUN
-            const run = spawn("docker", [
-                "run",
-                "-d",
+        // ⏳ SUCCESS CHECK
+        setTimeout(async () => {
+            if (hasError) return;
 
-                "--cpus=0.1",
-
-                "--memory=256m",
-                "--memory-swap=256m",
-
-                "--pids-limit=50",
-
-                "--name",
-                `${projectid}_container`,
-
-                projectid
+            const inspect = await exec("docker", [
+                "inspect",
+                "-f",
+                "{{.State.Running}}",
+                containerId
             ]);
 
-            let runError = "";
+            if (!inspect.out.includes("true")) {
+                return sendError("Container running emas", "INSPECT");
+            }
 
-            run.stdout.on("data", (d) => {
-                containerId += d.toString();
-            });
+            await updateStatus("✅ Loyiha muvaffaqiyatli ishga tushdi!");
 
-            run.stderr.on("data", (d) => {
-                runError += d.toString();
-            });
+            await UserProject.update(
+                { status: "active" },
+                { where: { project_id: projectid } }
+            ).catch(() => { });
+        }, 5000);
 
-            run.on("close", async (runCode) => {
-                if (runCode !== 0) {
-                    return ctx.telegram.editMessageText(
-                        ctx.chat.id,
-                        statusMsg.message_id,
-                        null,
-                        `❌ Run xato:\n${runError}`
-                    );
-                }
+        const wait = spawn("docker", ["wait", containerId]);
 
-                containerId = containerId.trim();
-
-                // 🟡 DB starting
-                await UserProject.create({
-                    telegram_id: String(ctx.from.id),
-                    project_id: projectid,
-                    project_name: projectname,
-                    container_id: containerId,
-                    status: "starting"
-                }).catch(() => { });
-
-                // 4. LOGS
-                const logs = spawn("docker", ["logs", "-f", containerId]);
-
-                const checkError = (log) => {
-                    const l = log.toLowerCase();
-                    return (
-                        l.includes("traceback") ||
-                        l.includes("error") ||
-                        l.includes("exception")
-                    );
-                };
-
-                logs.stdout.on("data", (d) => {
-                    const log = d.toString();
-                    process.stdout.write(log);
-
-                    if (checkError(log)) sendErrorToTelegram(log);
-                });
-
-                logs.stderr.on("data", (d) => {
-                    const log = d.toString();
-                    process.stderr.write(log);
-
-                    if (checkError(log)) sendErrorToTelegram(log);
-                });
-
-                // 5. DELAYED SUCCESS
-                setTimeout(async () => {
-                    if (hasError) return;
-
-                    const inspect = spawn("docker", [
-                        "inspect",
-                        "-f",
-                        "{{.State.Running}}",
-                        containerId
-                    ]);
-
-                    let status = "";
-
-                    inspect.stdout.on("data", (d) => {
-                        status += d.toString();
-                    });
-
-                    inspect.on("close", async () => {
-                        if (!status.includes("true")) {
-                            return sendErrorToTelegram("Container ishlamayapti");
-                        }
-
-                        // ✅ SUCCESS
-                        await ctx.telegram.editMessageText(
-                            ctx.chat.id,
-                            statusMsg.message_id,
-                            null,
-                            "✅ Loyiha muvaffaqiyatli ishga tushdi!"
-                        );
-
-                        await UserProject.update(
-                            { status: "active" },
-                            { where: { project_id: projectid } }
-                        ).catch(() => { });
-                    });
-                }, 5000);
-
-                // 6. CRASH DETECTOR
-                const wait = spawn("docker", ["wait", containerId]);
-
-                wait.on("close", async (exitCode) => {
-                    if (exitCode !== 0) {
-                        const crashLogs = spawn("docker", ["logs", containerId]);
-                        let fullLog = "";
-
-                        crashLogs.stdout.on("data", (d) => {
-                            fullLog += d.toString();
-                        });
-
-                        crashLogs.on("close", async () => {
-                            await sendErrorToTelegram(
-                                `Exit code ${exitCode}\n\n${fullLog}`
-                            );
-                        });
-                    }
-                });
-            });
+        wait.on("close", async (code) => {
+            if (code !== 0 && !hasError) {
+                const crashLogs = await exec("docker", ["logs", containerId]);
+                await sendError(
+                    `Exit code: ${code}\n\n${crashLogs.out}`,
+                    "CRASH"
+                );
+            }
         });
 
     } catch (err) {
-        console.error(err);
-        ctx.reply(`❌ Global xatolik: ${err.message}`);
+        await sendError(err.message, "GLOBAL");
     }
 };
 

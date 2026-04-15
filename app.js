@@ -1,16 +1,39 @@
 import { Markup } from "telegraf"
 import { bot, session } from "./bot.js"
 import { User } from "./models/user.model.js"
-import { checkSubscription, extractRar, extractZip, sendSoftwareInfo, flattenDirectory, runPythonInDocker, deleteProjectCompletely, renderProjectsMessage } from "./functions.js"
+import { checkSubscription, extractRar, extractZip, sendSoftwareInfo, flattenDirectory, runPythonInDocker, deleteProjectCompletely, renderProjectsMessage, logSystemUsage } from "./functions.js"
 import { fileURLToPath } from "url"
 import axios from "axios"
 import fs from "fs-extra"
 import path from "path"
 import { v4 as uuid } from "uuid"
+import os from "os";
+
 
 import "dotenv/config"
 import "./admin.js"
 import { UserProject } from "./models/userproject.model.js"
+const ADMIN_ID = process.env.ADMINID
+const MAX_ACTIVE_PROJECTS = 1;
+const SYSTEM_RESERVED_RAM = 2000;
+const MIN_FREE_RAM = 1000;
+const MAX_CPU_USAGE = 75;
+
+const getFreeRamMB = () => {
+    return os.freemem() / 1024 / 1024;
+};
+
+const getCpuLoad = () => {
+    return os.loadavg()[0];
+};
+
+const getCpuCores = () => {
+    return os.cpus().length;
+}
+
+const isAdmin = (ctx) => {
+    return String(ctx.from.id) === String(ADMIN_ID);
+};
 
 const channelId = process.env.CHANNELID
 
@@ -18,32 +41,53 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 async function startFunc(ctx, text2) {
+    if (!ctx.from) return
+
     const { id: telegram_id, username, first_name, last_name } = ctx.from
+
     const full_name = [first_name, last_name].filter(Boolean).join(' ')
+    const displayName = first_name || username || "Foydalanuvchi"
 
     const [user, created] = await User.findOrCreate({
         where: { telegram_id: String(telegram_id) },
-        defaults: { username, full_name }
+        defaults: {
+            username: username || null,
+            full_name
+        }
     })
+
     let text = ""
     if (created) {
-        text = `<b>Xush kelibsiz! ✨\n\n<a href="tg://user?id=${telegram_id}">${first_name}</a>, Pastdan kerakli bo'limni tanlang 😊</b>`
+        text = `<b>Xush kelibsiz! ✨
+
+<a href="tg://user?id=${telegram_id}">${displayName}</a>, pastdan kerakli bo‘limni tanlang 😊
+
+⚠️ Eslatma:
+Loyiha hozircha MVP (test) bosqichida ishlamoqda. Shu sababli ba’zi kamchiliklar yoki uzilishlar kuzatilishi mumkin.
+
+Hozirgi server o‘rtacha quvvatga ega va bot test rejimida ishlayapti. Yaqin orada yanada kuchli serverga o‘tamiz 🚀
+
+Iltimos, hozircha botdan yengil va oddiy loyihalar uchun foydalaning. Katta va yuklama yuqori bo‘lgan loyihalar uchun hali to‘liq mos emas.</b>`
     } else {
-        if (text2) {
-            text = text2
-        } else {
-            text = `<b>Qayta ko'rishganimdan hursandman 😊</b>`
-        }
+        text = `<b>Yana ko‘rishganimizdan xursandmiz 😊
+
+<a href="tg://user?id=${telegram_id}">${displayName}</a>, pastdan kerakli bo‘limni tanlang 👇
+
+⚠️ Eslatma:
+Loyiha hozircha MVP (test) bosqichida ishlamoqda. Shu sababli ba’zi kamchiliklar yoki uzilishlar bo‘lishi mumkin.
+
+Hozirgi server o‘rtacha quvvatga ega va bot test rejimida ishlayapti. Yaqin orada kuchli serverga o‘tamiz 🚀
+
+Iltimos, hozircha botdan yengil va oddiy loyihalar uchun foydalaning. Katta yuklama talab qiladigan loyihalar uchun hali to‘liq mos emas.</b>`
     }
 
-    await ctx.replyWithHTML(text, Markup.keyboard
-        (
-            [
-                ["➕ Loyiha qo'shish"],
-                ["🚀 Loyihalarim"],
-                ["👨‍💻 Admin bilan aloqa", "📚 Kerakli resurslar"]
-            ]
-        ).resize()
+    await ctx.replyWithHTML(
+        text,
+        Markup.keyboard([
+            ["➕ Loyiha qo'shish"],
+            ["🚀 Loyihalarim"],
+            ["👨‍💻 Admin bilan aloqa", "📚 Kerakli resurslar"]
+        ]).resize()
     )
 }
 
@@ -72,7 +116,6 @@ async function onMessageFunc(ctx) {
     const text = ctx.message.text
     const userSession = session[ctx.from.id]
 
-    // Obunani tekshirish
     const isSubscribed = await checkSubscription(ctx, channelId)
     if (!isSubscribed) {
         return callToSubscription(ctx)
@@ -101,13 +144,12 @@ async function onMessageFunc(ctx) {
         return await ctx.replyWithHTML("<b>✅ Arxiv qabul qilindi.</b>\n\nEndi, loyihangizga nom bering:");
     }
 
-    // 2-QADAM: Loyiha nomini qabul qilish
     else if (userSession["state"] === "waiting_project_name") {
         if (!text) {
             return await ctx.reply("Iltimos, loyiha nomini matn ko'rinishida yozing:");
         }
 
-        userSession.projectName = text; // Nomni saqlash
+        userSession.projectName = text;
         userSession.state = "waiting_main_file"; // Holatni o'zgartirish
 
         return await ctx.replyWithHTML(
@@ -177,16 +219,125 @@ async function onMessageFunc(ctx) {
         return;
     }
 
-    // --- ASOSIY BUYRUQLAR ---
     if (text === "➕ Loyiha qo'shish") {
-        userSession["state"] = "waiting_document"
+
+        const telegramId = String(ctx.from.id);
+        const admin = isAdmin(ctx);
+
+        // ================= 1. ACTIVE PROJECT CHECK =================
+        if (!admin) {
+            const activeCount = await UserProject.count({
+                where: {
+                    telegram_id: telegramId
+                }
+            });
+
+            if (activeCount >= MAX_ACTIVE_PROJECTS) {
+
+                const activeProject = await UserProject.findOne({
+                    where: {
+                        telegram_id: telegramId,
+                        status: "active"
+                    }
+                });
+
+                return await ctx.replyWithHTML(
+                    "⚠️ <b>Sizda allaqachon faol loyiha mavjud!</b>\n\n" +
+
+                    `📌 <b>Loyiha nomi:</b> <code>${activeProject?.project_name}</code>\n\n` +
+
+                    "🚫 <b>Hozircha cheklov:</b>\n" +
+                    "Siz bir vaqtning o‘zida faqat <b>1 ta loyiha</b> ishga tushira olasiz.\n\n" +
+
+                    "💡 <b>Sabab (MVP rejim):</b>\n" +
+                    "• Platforma hozir <b>test (MVP)</b> bosqichida ishlamoqda\n" +
+                    "• Server resurslari cheklangan\n" +
+                    "• Har bir foydalanuvchi tizimni ortiqcha yuklamasligi uchun limit qo‘yilgan\n\n" +
+
+                    "🔧 <b>Yechim:</b>\n" +
+                    "Avval mavjud loyihani to‘xtating yoki o‘chiring, so‘ng yangi loyiha qo‘shing.\n\n" +
+
+                    "🙏 <b>Tushunganingiz uchun rahmat!</b>"
+                );
+            }
+        }
+
+        // ================= 2. RAM CHECK =================
+        const freeRAM = getFreeRamMB();
+
+        if (!admin && freeRAM < SYSTEM_RESERVED_RAM + MIN_FREE_RAM) {
+            return await ctx.replyWithHTML(
+                "⚠️ <b>Server resurslari yetarli emas (RAM)</b>\n\n" +
+
+                "🚫 Hozir yangi loyiha ishga tushirib bo‘lmaydi.\n\n" +
+
+                "💡 <b>Batafsil sabab:</b>\n" +
+                "• Serverda boshqa loyihalar faol ishlamoqda\n" +
+                "• Hozirgi RAM yuklanishi yuqori\n" +
+                "• Tizim barqarorligini saqlash uchun rezerv RAM ajratilgan\n\n" +
+
+                "⏳ <b>Yechim:</b>\n" +
+                "Iltimos, biroz vaqt o‘tgach qayta urinib ko‘ring.\n\n" +
+
+                "🙏 Tushunganingiz uchun rahmat!"
+            );
+        }
+
+        // ================= 3. CPU CHECK =================
+        const cpuLoad = getCpuLoad();
+        const cpuCores = getCpuCores();
+        const cpuUsage = (cpuLoad / cpuCores) * 100;
+
+        if (!admin && cpuUsage > MAX_CPU_USAGE) {
+            return await ctx.replyWithHTML(
+                "⚠️ <b>Server CPU band (yuklanish yuqori)</b>\n\n" +
+
+                "🚫 Hozir yangi loyiha ishga tushirib bo‘lmaydi.\n\n" +
+
+                "💡 <b>Batafsil sabab:</b>\n" +
+                "• CPU hozir boshqa jarayonlar bilan band\n" +
+                "• Tizim yuqori yuk ostida ishlayapti\n" +
+                "• Barqaror ishlash uchun cheklov qo‘yilgan\n\n" +
+
+                "⏳ <b>Yechim:</b>\n" +
+                "Birozdan so‘ng qayta urinib ko‘ring.\n\n" +
+
+                "🙏 Rahmat!"
+            );
+        }
+
+        // ================= 4. OK STATE =================
+        userSession["state"] = "waiting_document";
+
         await ctx.replyWithHTML(
-            "<b>📦 Loyihani yuklash</b>\n\n" +
-            "Iltimos, loyihangiz papkasini <b>.zip</b> yoki <b>.rar</b> formatida yuboring.\n\n" +
-            "<b>⚠️ Muhim shartlar:</b>\n" +
-            "• <code>requirements.txt</code> fayli mavjud bo'lishi shart.\n" +
-            "• Asosiy ishga tushuvchi fayl loyihaning <b>ildiz (root)</b> qismida joylashishi kerak."
+            "📦 <b>Loyihani yuklash</b>\n\n" +
+
+            "Iltimos, loyihangizni <b>.zip</b> yoki <b>.rar</b> formatida yuboring.\n\n" +
+
+            "⚠️ <b>Talablar:</b>\n" +
+            "• <code>requirements.txt</code> fayli mavjud bo‘lishi shart\n" +
+            "• Asosiy ishga tushuvchi fayl (masalan: main.py) root papkada bo‘lishi kerak\n" +
+            "• Fayl strukturasi to‘g‘ri bo‘lishi kerak\n\n"
         );
+
+        // ================= DEBUG LOG =================
+        console.log(`
+📊 VPS STATUS
+--------------------------------
+ADMIN MODE: ${admin ? "YES" : "NO"}
+
+RAM:
+FREE: ${freeRAM.toFixed(0)} MB
+RESERVED: ${SYSTEM_RESERVED_RAM} MB
+BUFFER: ${MIN_FREE_RAM} MB
+
+CPU:
+LOAD: ${cpuLoad.toFixed(2)}
+CORES: ${cpuCores}
+USAGE: ${cpuUsage.toFixed(1)}%
+
+--------------------------------
+`);
     }
 
     else if (text === "🚀 Loyihalarim") {
