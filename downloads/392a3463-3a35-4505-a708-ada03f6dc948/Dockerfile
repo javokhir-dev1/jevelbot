@@ -5,4 +5,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN useradd -m appuser
 COPY . .
 USER appuser
-CMD ["python", "python.py"]
+CMD ["python", "-u", "main.py"]

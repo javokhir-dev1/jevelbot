@@ -1,7 +1,7 @@
 import { Markup } from "telegraf"
 import { bot, session } from "./bot.js"
 import { User } from "./models/user.model.js"
-import { checkSubscription, extractRar, extractZip, sendSoftwareInfo, flattenDirectory, runPythonInDocker } from "./functions.js"
+import { checkSubscription, extractRar, extractZip, sendSoftwareInfo, flattenDirectory, runPythonInDocker, deleteProjectCompletely, renderProjectsMessage } from "./functions.js"
 import { fileURLToPath } from "url"
 import axios from "axios"
 import fs from "fs-extra"
@@ -79,9 +79,6 @@ async function onMessageFunc(ctx) {
             .catch((err) => console.log(err))
     }
 
-    // --- BOSQICHMA-BOSQICH MULOQOT (STEP-BY-STEP DIALOG) ---
-
-    // 1-QADAM: Arxivni qabul qilish
     if (userSession["state"] === "waiting_document") {
         const file = ctx.message.document;
         const allowedExtensions = ['zip', 'rar'];
@@ -115,7 +112,7 @@ async function onMessageFunc(ctx) {
 
         return await ctx.replyWithHTML(
             "<b>🚀 Asosiy faylni ko'rsating</b>\n\n" +
-            "Ishga tushishi kerak bo'lgan fayl nomini yozing (masalan: <code>main.py</code> yoki <code>app.js</code>):"
+            "Ishga tushishi kerak bo'lgan fayl nomini yozing (masalan: <code>main.py</code>):"
         );
     }
 
@@ -202,11 +199,11 @@ async function onMessageFunc(ctx) {
         }
 
         const projectList = projects.map((p, index) =>
-            `${index + 1}. <b>ID:</b> <code>${p.project_name}</code> | <b>Holati:</b> ${p.status}`
+            `${index + 1}. <b>Nomi:</b> <code>${p.project_name}</code> | <b>Holati:</b> ${p.status}`
         ).join('\n');
 
         const buttons = projects.map(p => [
-            Markup.button.callback(`❌ O'chirish: ${p.project_id}`, `delete_project_${p.id}`)
+            Markup.button.callback(`❌ O'chirish: ${p.project_name}`, `delete_project_${p.id}`)
         ]);
 
         await ctx.replyWithHTML(
@@ -252,6 +249,27 @@ async function onMessageFunc(ctx) {
         )
     }
 }
+
+bot.action(/delete_project_(.+)/, async (ctx) => {
+    try {
+        const project_id = ctx.match[1];
+
+        const result = await deleteProjectCompletely(project_id);
+
+        if (result.success) {
+            await ctx.answerCbQuery("✅ O'chirildi", { show_alert: true });
+
+            // 🔥 MUHIM: message refresh
+            await renderProjectsMessage(ctx);
+        } else {
+            await ctx.answerCbQuery("❌ O'chirishda xatolik", { show_alert: true });
+        }
+
+    } catch (err) {
+        console.log(err);
+        await ctx.answerCbQuery("❌ Server xatosi", { show_alert: true });
+    }
+});
 
 bot.action("cancel_process", async (ctx) => {
     try {

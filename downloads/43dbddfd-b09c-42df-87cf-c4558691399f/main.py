@@ -1,6 +1,6 @@
 import telebot
 # Bot tokenini bu yerga yozing (@BotFather orqali olingan)
-API_TOKEN = '8713015378:AAEEihmLZbuP4GYsFQbj029i7Ltfgk5vrKo'
+API_TOKEN = '8716886307:AAHwQXmHr4iYnJ6sm-PIH9fU3uAlKE1B4X4'
 
 bot = telebot.TeleBot(API_TOKEN)
 

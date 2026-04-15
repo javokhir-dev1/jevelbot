@@ -5,4 +5,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN useradd -m appuser
 COPY . .
 USER appuser
-CMD ["python", "main.py"]
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "-u", "main.py"]
