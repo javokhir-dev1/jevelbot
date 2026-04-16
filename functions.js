@@ -131,6 +131,9 @@ export const runPythonInDocker = async (
         errorSent = true;
         hasError = true;
 
+        console.log("[ERROR STAGE]:", stage);
+        console.log("[ERROR LOG]:", log);
+
         const safeLog = log
             .toString()
             .replace(/&/g, "&amp;")
@@ -149,6 +152,7 @@ export const runPythonInDocker = async (
         await updateStatus("❌ Loyiha xatolik bilan to‘xtadi!");
 
         if (containerId) {
+            console.log("[DOCKER REMOVE]:", containerId);
             spawn("docker", ["rm", "-f", containerId]);
         }
 
@@ -159,23 +163,38 @@ export const runPythonInDocker = async (
 
     const exec = (cmd, args) =>
         new Promise((resolve) => {
+            console.log("[EXEC START]:", cmd, args.join(" "));
+
             const p = spawn(cmd, args);
             let out = "";
             let err = "";
 
-            p.stdout?.on("data", d => out += d.toString());
-            p.stderr?.on("data", d => err += d.toString());
+            p.stdout?.on("data", d => {
+                const data = d.toString();
+                console.log("[EXEC OUT]:", data);
+                out += data;
+            });
 
-            p.on("close", code => resolve({ code, out, err }));
+            p.stderr?.on("data", d => {
+                const data = d.toString();
+                console.log("[EXEC ERR]:", data);
+                err += data;
+            });
+
+            p.on("close", code => {
+                console.log("[EXEC CLOSE]:", code);
+                resolve({ code, out, err });
+            });
         });
 
     try {
+        console.log("=== START PROJECT ===");
+
         await updateStatus("📦 Loyihani tayyorlash...");
 
-        // 🧹 eski container
+        console.log("[DOCKER REMOVE OLD]:", `${projectid}_container`);
         spawn("docker", ["rm", "-f", `${projectid}_container`]);
 
-        // 🐳 Dockerfile
         await updateStatus("📝 Muhit sozlanmoqda...");
 
         const dockerfileContent = `
@@ -196,27 +215,37 @@ ENV PYTHONUNBUFFERED=1
 CMD ["python", "-u", "${pythonFile}"]
 `.trim();
 
+        console.log("[WRITE DOCKERFILE]:", dockerfilePath);
         fs2.writeFileSync(dockerfilePath, dockerfileContent);
 
-
+        console.log("[DOCKER BUILD START]");
         const build = spawn("docker", ["build", "-t", projectid, absolutePath]);
 
         let buildError = "";
 
-        build.stderr.on("data", d => buildError += d.toString());
+        build.stdout.on("data", d => {
+            console.log("[BUILD OUT]:", d.toString());
+        });
+
+        build.stderr.on("data", d => {
+            console.log("[BUILD ERR]:", d.toString());
+            buildError += d.toString();
+        });
 
         const buildCode = await new Promise(resolve =>
             build.on("close", resolve)
         );
+
+        console.log("[BUILD DONE CODE]:", buildCode);
 
         if (buildCode !== 0) {
             await sendError(buildError, "BUILD");
             return;
         }
 
-        // 🚀 RUN
         await updateStatus("🚀 Muhit ishga tushirilmoqda...");
 
+        console.log("[DOCKER RUN START]");
         const run = await exec("docker", [
             "run",
             "-d",
@@ -229,12 +258,16 @@ CMD ["python", "-u", "${pythonFile}"]
             projectid
         ]);
 
+        console.log("[RUN OUT]:", run.out);
+        console.log("[RUN ERR]:", run.err);
+
         if (run.code !== 0) {
             await sendError(run.err, "RUN");
             return;
         }
 
         containerId = run.out.trim();
+        console.log("[CONTAINER ID]:", containerId);
 
         await updateStatus("🟡 Muhit ishga tushdi, tekshirilmoqda...");
 
@@ -246,14 +279,72 @@ CMD ["python", "-u", "${pythonFile}"]
             status: "starting"
         }).catch(() => { });
 
-        // 📜 LOG STREAM
+        console.log("[START LOG STREAM]");
         const logs = spawn("docker", ["logs", "-f", containerId]);
 
-        const isError = (text) =>
-            /traceback|error|exception|failed/i.test(text);
+        const isError = (text) => {
+            const t = text.toLowerCase();
+
+            return (
+                // general
+                t.includes("error") ||
+                t.includes("failed") ||
+                t.includes("fatal") ||
+                t.includes("panic") ||
+
+                // python
+                t.includes("traceback") ||
+                t.includes("exception") ||
+                t.includes("modulenotfounderror") ||
+                t.includes("importerror") ||
+                t.includes("syntaxerror") ||
+                t.includes("indentationerror") ||
+                t.includes("nameerror") ||
+                t.includes("typeerror") ||
+                t.includes("valueerror") ||
+                t.includes("runtimeerror") ||
+                t.includes("assertionerror") ||
+
+                t.includes("no such file") ||
+                t.includes("can't open file") ||
+                t.includes("file not found") ||
+
+                t.includes("oci runtime") ||
+                t.includes("container_linux") ||
+                t.includes("cannot start container") ||
+                t.includes("exec user process") ||
+
+                t.includes("could not find a version") ||
+                t.includes("no matching distribution") ||
+                t.includes("failed building wheel") ||
+                t.includes("resolutionimpossible") ||
+
+                t.includes("killed") ||
+                t.includes("out of memory") ||
+                t.includes("cannot allocate memory") ||
+                t.includes("enospc") ||
+                t.includes("disk full") ||
+
+                // network
+                t.includes("connection refused") ||
+                t.includes("timed out") ||
+                t.includes("temporary failure") ||
+
+                // permissions
+                t.includes("permission denied") ||
+                t.includes("operation not permitted") ||
+                t.includes("eacces") ||
+
+                // low-level crash
+                t.includes("segmentation fault")
+            );
+        };
 
         logs.stdout.on("data", async (d) => {
             const log = d.toString();
+
+            console.log("[CONTAINER STDOUT]:", log);
+
             errorBuffer += log;
 
             if (!hasError && isError(errorBuffer)) {
@@ -263,6 +354,9 @@ CMD ["python", "-u", "${pythonFile}"]
 
         logs.stderr.on("data", async (d) => {
             const log = d.toString();
+
+            console.log("[CONTAINER STDERR]:", log);
+
             errorBuffer += log;
 
             if (!hasError && isError(errorBuffer)) {
@@ -270,9 +364,10 @@ CMD ["python", "-u", "${pythonFile}"]
             }
         });
 
-        // ⏳ SUCCESS CHECK
         setTimeout(async () => {
             if (hasError) return;
+
+            console.log("[CHECK CONTAINER STATUS]");
 
             const inspect = await exec("docker", [
                 "inspect",
@@ -281,11 +376,13 @@ CMD ["python", "-u", "${pythonFile}"]
                 containerId
             ]);
 
+            console.log("[INSPECT RESULT]:", inspect.out);
+
             if (!inspect.out.includes("true")) {
                 return sendError("Container running emas", "INSPECT");
             }
 
-            await updateStatus("✅ Loyiha muvaffaqiyatli ishga tushdi!");
+            await updateStatus("✅ Loyiha muvaffaqiyatli ishga tushirildi. \n\nAgarda hali ishga tushmagan bo'lsa. Iltimos, bir necha daqiqadan so‘ng qayta urinib ko‘ring. Xatolar hozirda tekshirilmoqda.");
 
             await UserProject.update(
                 { status: "active" },
@@ -296,8 +393,11 @@ CMD ["python", "-u", "${pythonFile}"]
         const wait = spawn("docker", ["wait", containerId]);
 
         wait.on("close", async (code) => {
+            console.log("[CONTAINER EXIT CODE]:", code);
+
             if (code !== 0 && !hasError) {
                 const crashLogs = await exec("docker", ["logs", containerId]);
+
                 await sendError(
                     `Exit code: ${code}\n\n${crashLogs.out}`,
                     "CRASH"
@@ -306,6 +406,7 @@ CMD ["python", "-u", "${pythonFile}"]
         });
 
     } catch (err) {
+        console.log("[GLOBAL ERROR]:", err);
         await sendError(err.message, "GLOBAL");
     }
 };

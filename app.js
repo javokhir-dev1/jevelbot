@@ -85,8 +85,7 @@ Iltimos, hozircha botdan yengil va oddiy loyihalar uchun foydalaning. Katta yukl
         text,
         Markup.keyboard([
             ["➕ Loyiha qo'shish"],
-            ["🚀 Loyihalarim"],
-            ["👨‍💻 Admin bilan aloqa", "📚 Kerakli resurslar"]
+            ["👨‍💻 Admin bilan aloqa", "🚀 Loyihalarim"]
         ]).resize()
     )
 }
@@ -150,15 +149,14 @@ async function onMessageFunc(ctx) {
         }
 
         userSession.projectName = text;
-        userSession.state = "waiting_main_file"; // Holatni o'zgartirish
+        userSession.state = "waiting_main_file"; 
 
         return await ctx.replyWithHTML(
             "<b>🚀 Asosiy faylni ko'rsating</b>\n\n" +
-            "Ishga tushishi kerak bo'lgan fayl nomini yozing (masalan: <code>main.py</code>):"
+            "Ishga tushishi kerak bo'lgan fayl nomini yozing (masalan: <code>main.py</code>)\n\nHarflar katta kichikligiga ham e'tibor bering!"
         );
     }
 
-    // 3-QADAM: Asosiy faylni qabul qilish va Dockerga yuborish
     else if (userSession["state"] === "waiting_main_file") {
         if (!text) {
             return await ctx.reply("Fayl nomini matn ko'rinishida yozing (masalan: main.py):");
@@ -167,7 +165,7 @@ async function onMessageFunc(ctx) {
         const mainFile = text;
         const projectName = userSession.projectName;
         const fileId = userSession.tempFileId;
-
+        
         const statusMsg = await ctx.reply("⏳ Loyiha ishga tushirilmoqda...");
 
         try {
@@ -224,7 +222,6 @@ async function onMessageFunc(ctx) {
         const telegramId = String(ctx.from.id);
         const admin = isAdmin(ctx);
 
-        // ================= 1. ACTIVE PROJECT CHECK =================
         if (!admin) {
             const activeCount = await UserProject.count({
                 where: {
